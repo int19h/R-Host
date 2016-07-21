@@ -29,11 +29,12 @@
 #include "blobs.h"
 
 using namespace std::literals;
+using namespace boost::endian;
 using namespace rhost::log;
 using namespace rhost::util;
 using namespace rhost::eval;
 using namespace rhost::json;
-using namespace rhost::raw;
+using namespace rhost::blobs;
 
 namespace rhost {
     namespace host {
@@ -49,6 +50,19 @@ namespace rhost {
 
         boost::signals2::signal<void()> callback_started;
         boost::signals2::signal<void()> readconsole_done;
+
+        struct message_header {
+            little_uint32_buf_t flags;
+            little_uint64_buf_t id;
+            little_uint64_buf_t request_id;
+            little_int8_buf_t name_length;
+            char name[];
+        };
+
+        enum class message_flags : uint32_t {
+            request = 1 << 1
+        };
+        FLAGS_ENUM(message_flags);
 
         typedef websocketpp::connection<websocketpp::config::asio> ws_connection_type;
 
@@ -80,7 +94,7 @@ namespace rhost {
         std::promise<void> connected_promise;
         std::atomic<bool> is_connection_closed = false;
         std::atomic<bool> is_waiting_for_wm = false;
-        long long next_message_id = 0;
+        long long next_message_id = 2;
         bool allow_callbacks = true, allow_intr_in_CallBack = true;
 
         // Specifies whether the host is currently expecting a response message to some earlier request that it had sent.
@@ -96,11 +110,32 @@ namespace rhost {
         std::queue<message> eval_requests;
         std::mutex eval_requests_mutex;
 
-        struct eval_info {
-            const std::string id;
-            bool is_cancelable;
+        enum class eval_kind : uint32_t {
+            normal = 0,
+            reentrant = 1 << 1,
+            base_env = 1 << 3,
+            empty_env = 1 << 4,
+            cancelable = 1 << 5,
+            mutating = 1 << 7,
+            no_result = 1 << 8,
+            blob_result = 1 << 9
+        };
+        FLAGS_ENUM(eval_kind);
 
-            eval_info(const std::string& id, bool is_cancelable)
+        enum class eval_result_kind : uint8_t {
+            error,
+            cancel,
+            none,
+            json,
+            blob,
+        };
+        FLAGS_ENUM(eval_result_kind);
+
+        struct eval_info {
+            const uint64_t id;
+            const bool is_cancelable;
+
+            eval_info(uint64_t id, bool is_cancelable)
                 : id(id), is_cancelable(is_cancelable) {
             }
         };
@@ -117,19 +152,14 @@ namespace rhost {
         // When cancellation for any eval on the stack is requested, all evals that follow it on the stack are also canceled,
         // since execution will not return to the eval unless all nested evals are terminated. When cancellation of all evals
         // is requested, it is implemented as cancellation of the topmost dummy eval. 
-        std::vector<eval_info> eval_stack({ eval_info("", true) });
+        std::vector<eval_info> eval_stack({ eval_info(0, true) });
         bool canceling_eval; // whether we're currently processing a cancellation request by unwinding the eval stack
-        std::string eval_cancel_target; // ID of the eval on the stack that is the cancellation target
+        uint64_t eval_cancel_target; // ID of the eval on the stack that is the cancellation target
         std::mutex eval_stack_mutex;
 
-        // This queue holds the JSON message that client sent before sending the blob payload. This queue should not have 
-        // more than one item in it.
-        std::queue<message> binary_message_queue;
-        std::mutex binary_message_queue_mutex;
-
-        int next_blob_id = 0;
-        std::map<int, rhost::util::blob> received_blobs;
-        std::mutex received_blobs_mutex;
+        uint64_t next_blob_id = 1;
+        std::map<uint64_t, std::vector<char>> blobs;
+        std::mutex blobs_mutex;
 
         void terminate_if_closed() {
             // terminate invokes R_Suicide, which may invoke WriteConsole and/or ShowMessage, which will
@@ -214,6 +244,18 @@ namespace rhost {
             return id;
         }
 
+        uint64_t send_message(const char* name, message_kind kind, uint64_t request_id, const std::string& body) {
+            if (!is_connection_closed) {
+                auto err = ws_conn->send(json, websocketpp::frame::opcode::text);
+                if (err) {
+                    fatal_error("Send failed: [%d] %s", err.value(), err.message().c_str());
+                }
+                return err;
+            } else {
+                return std::error_code();
+            }
+        }
+
         std::string send_notification(const char* name, const rhost::util::blob& blob, const picojson::array& args) {
             assert(name[0] == '!');
             return send_message(name, args, blob);
@@ -283,129 +325,88 @@ namespace rhost {
             }
         }
 
-        void create_blob(const message& msg) {
-            assert(msg.name == "?CreateBlob");
-
-            if (msg.blob.size() != msg.blob_count) {
-                fatal_error("Incomplete blob creation message %s.", msg.id.c_str());
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(received_blobs_mutex);
-                int blob_id = ++next_blob_id;
-                received_blobs[blob_id] = msg.blob;
-                respond_to_message(msg, static_cast<double>(blob_id));
-            }
-        }
-
-        int create_blob(const rhost::util::blob& blob) {
-            std::lock_guard<std::mutex> lock(received_blobs_mutex);
-            int blob_id = ++next_blob_id;
-            received_blobs[blob_id] = blob;
+        uint64_t create_blob(std::vector<char>&& blob) {
+            std::lock_guard<std::mutex> lock(blobs_mutex);
+            uint64_t blob_id = ++next_blob_id;
+            blobs[blob_id] = blob;
             return blob_id;
         }
 
-        const blob_slice get_blob_as_single_slice(int blob_id) {
-            std::map<int, rhost::util::blob>::iterator res = received_blobs.find(blob_id);
-            blob_slice data;
+        void create_blob(const message& msg) {
+            assert(msg.name == "CreateBlob");
 
-            if (res == received_blobs.end()) {
-                return data;
-            }
+            struct create_blob_request {
+                little_uint64_buf_t size;
+                char data[];
+            } const* request = reinterpret_cast<const create_blob_request*>(msg.body.data());
 
-            size_t totalSize = 0;
-            for (blob_slice& slice : res->second) {
-                totalSize += slice.size();
-            }
-
-            data.reserve(totalSize);
-            for (blob_slice& slice : res->second) {
-                data.insert(data.end(), slice.begin(), slice.end());
-            }
-
-            return data;
+            std::vector<char> blob(request->data, request->data + request->size.value());
+            uint64_t blob_id = create_blob(std::move(blob));
+            respond_to_message(msg, static_cast<double>(blob_id));
         }
 
-        void get_blobs(const message& msg) {
-            assert(msg.name == "?GetBlob");
+        void get_blob(uint64_t id, std::vector<char>& result) {
+            std::lock_guard<std::mutex> lock(blobs_mutex);
 
-            blob blob;
-            picojson::array blob_ids;
-            for (int i = 0; i < msg.args.size(); ++i) {
-                int blob_id = static_cast<int>(msg.args[i].get<double>());
-                blob_slice slice = get_blob_as_single_slice(blob_id);
-                if (slice.size() > 0) {
-                    blob.push_back(slice);
-                    rhost::util::append(blob_ids, static_cast<double>(blob_id));
-                }
+            auto it = blobs.find(id);
+            if (it == blobs.end()) {
+                fatal_error("ReadBlob: no blob with ID %" PRIu64, id);
             }
 
-            respond_to_message(msg, blob, blob_ids);
+            result = it->second;
         }
 
-        void destroy_blob(int blob_id) {
-            std::lock_guard<std::mutex> lock(received_blobs_mutex);
-            received_blobs.erase(blob_id);
+        void get_blob(const message& msg) {
+            assert(msg.name == "GetBlob");
+
+            struct read_blob_request {
+                little_uint64_buf_t blob_id;
+            } const* request = reinterpret_cast<const read_blob_request*>(msg.body.data());
+
+            respond_to_message(msg, get_blob(request->blob_id.value()));
+        }
+
+        void destroy_blob(uint64_t blob_id) {
+            std::lock_guard<std::mutex> lock(blobs_mutex);
+            blobs.erase(blob_id);
         }
 
         void destroy_blobs(const message& msg) {
-            assert(msg.name == "!DestroyBlob");
-            std::lock_guard<std::mutex> lock(received_blobs_mutex);
-            for (int i = 0; i < msg.args.size(); ++i) {
-                int blob_id = static_cast<int>(msg.args[i].get<double>());
-                received_blobs.erase(blob_id);
+            assert(msg.name == "DestroyBlob");
+
+            struct destroy_blobs_request {
+                little_uint64_buf_t blob_ids[];
+            } const* request = reinterpret_cast<const destroy_blobs_request*>(msg.body.data());
+
+            std::lock_guard<std::mutex> lock(blobs_mutex);
+            for (size_t i = 0;; ++i) {
+                uint64_t blob_id = request->blob_ids[i].value();
+                if (!blob_id) {
+                    break;
+                }
+                destroy_blob(blob_id);
             }
         }
 
         void handle_eval(const message& msg) {
-            assert(msg.name.size() >= 2 && msg.name[0] == '?' && msg.name[1] == '=');
+            assert(msg.name == "=");
 
-            if (msg.args.size() != 1 || !msg.args[0].is<std::string>()) {
-                fatal_error("Invalid evaluation request %s: must have form [id, '=<flags>', expr].", msg.id.c_str());
-            }
+            struct eval_request {
+                little_uint32_buf_t kind;
+                char expr[];
+            } const* request = reinterpret_cast<const eval_request*>(msg.body.data());
 
             SCOPE_WARDEN_RESTORE(allow_callbacks);
             allow_callbacks = false;
 
-            const auto& expr = from_utf8(msg.args[0].get<std::string>());
+            auto kind = static_cast<eval_kind>(request->kind.value());
+            const auto& expr = from_utf8(request->expr);
             log::logf("%s = %s\n\n", msg.id.c_str(), expr.c_str());
 
-            SEXP env = nullptr;
-            bool is_cancelable = false, new_env = false, no_result = false, raw_response = false;
-
-            for (auto it = msg.name.begin() + 2; it != msg.name.end(); ++it) {
-                switch (char c = *it) {
-                case 'B':
-                case 'E':
-                    if (env != nullptr) {
-                        fatal_error("'%s': multiple environment flags specified.", msg.name.c_str());
-                    }
-                    env = (c == 'B') ? R_BaseEnv : R_EmptyEnv;
-                    break;
-                case 'N':
-                    new_env = true;
-                    break;
-                case '@':
-                    allow_callbacks = true;
-                    break;
-                case '/':
-                    is_cancelable = true;
-                    break;
-                case '0':
-                    no_result = true;
-                    break;
-                case 'r':
-                    raw_response = true;
-                    break;
-                default:
-                    fatal_error("'%s': unrecognized flag '%c'.", msg.name.c_str(), c);
-                }
-            }
-
-            if (!env) {
-                env = R_GlobalEnv;
-            }
-
+            SEXP env =
+                has_flag(kind, eval_kind::base_env) ? R_BaseEnv :
+                has_flag(kind, eval_kind::empty_env) ? R_EmptyEnv :
+                R_GlobalEnv;
             r_eval_result<protected_sexp> result = {};
             ParseStatus ps;
             {
@@ -418,7 +419,7 @@ namespace rhost {
                 bool was_before_invoked = false;
                 auto before = [&] {
                     std::lock_guard<std::mutex> lock(eval_stack_mutex);
-                    eval_stack.push_back(eval_info(msg.id, is_cancelable));
+                    eval_stack.push_back(eval_info(msg.id, has_flag(kind, eval_kind::cancelable)));
                     was_before_invoked = true;
                 };
 
@@ -446,9 +447,7 @@ namespace rhost {
                     was_after_invoked = true;
                 };
 
-                protected_sexp eval_env(new_env ? Rf_NewEnvironment(R_NilValue, R_NilValue, env) : env);
-
-                auto results = r_try_eval(expr, eval_env.get(), ps, before, after);
+                auto results = r_try_eval(expr, env, ps, before, after);
                 if (!results.empty()) {
                     result = results.back();
                 }
@@ -464,44 +463,49 @@ namespace rhost {
                 allow_intr_in_CallBack = true;
             }
 
-            picojson::value parse_status;
-            switch (ps) {
-            case PARSE_NULL:
-                parse_status = picojson::value("NULL");
-                break;
-            case PARSE_OK:
-                parse_status = picojson::value("OK");
-                break;
-            case PARSE_INCOMPLETE:
-                parse_status = picojson::value("INCOMPLETE");
-                break;
-            case PARSE_ERROR:
-                parse_status = picojson::value("ERROR");
-                break;
-            case PARSE_EOF:
-                parse_status = picojson::value("EOF");
-                break;
-            default:
-                parse_status = picojson::value(double(ps));
-                break;
-            }
-
-            picojson::value error, value;
-            rhost::util::blob blob;
+            std::string data;
             if (result.has_error) {
-                error = picojson::value(to_utf8(result.error));
-            }
-            if (result.has_value && !no_result) {
+                data = to_utf8(result.error);
+            } else if (result.has_value && !has_flag(kind, eval_kind::no_result)) {
                 try {
-                    if (raw_response) {
-                        errors_to_exceptions([&] { to_blob(result.value.get(), blob); });
+                    if (has_flag(kind, eval_kind::blob_result)) {
+                        errors_to_exceptions([&] { to_blob(result.value.get(), data); });
                     } else {
-                        errors_to_exceptions([&] { to_json(result.value.get(), value); });
+                        picojson::value json;
+                        errors_to_exceptions([&] { to_json(result.value.get(), json); });
+                        data = json.serialize();
                     }
                 } catch (r_error& err) {
                     fatal_error("%s", err.what());
                 }
             }
+
+            struct eval_response {
+                little_uint8_buf_t parse_status;
+                little_uint8_buf_t kind;
+                little_uint64_buf_t length;
+                char data[];
+            };
+
+            std::unique_ptr<char[]> buf(new char[sizeof eval_response + data.size()]);
+            auto response = reinterpret_cast<eval_response*>(buf.get());
+
+            response->parse_status = ps;
+
+            if (result.has_error) {
+                response->kind = eval_result_kind::error;
+            } else if (result.is_canceled) {
+                response->kind = eval_result_kind::cancel;
+            } else if (has_flag(kind, eval_kind::no_result)) {
+                response->kind = eval_result_kind::none;
+            } else if (has_flag(kind, eval_kind::blob_result)) {
+                response->kind = eval_result_kind::blob;
+            } else {
+                response->kind = eval_result_kind::json;
+            }
+
+            response->length = data.size();
+            memcpy(response->data, data.data(), data.size());
 
 #ifdef TRACE_JSON
             indent_log(+1);
@@ -840,79 +844,60 @@ namespace rhost {
         }
 
         void ws_open_handler(websocketpp::connection_hdl hdl) {
-            send_notification("!Microsoft.R.Host", 1.0, getDLLVersion());
+            send_notification("Microsoft.R.Host", 1.0, getDLLVersion());
             connected_promise.set_value();
 
             std::error_code ec;
             ws_conn->ping("", ec);
         }
 
-        void handle_json_message(ws_connection_type::message_ptr msg) {
-            const auto& json = msg->get_payload();
+        void ws_message_handler(websocketpp::connection_hdl hdl, ws_connection_type::message_ptr ws_msg) {
+            if (ws_msg->get_opcode() != websocketpp::frame::opcode::value::binary) {
+                fatal_error("Non-binary websocket message received.");
+            }
+
+            const std::string& payload = ws_msg->get_payload();
+            const char* body = payload.data();
+
+            auto header = reinterpret_cast<const message_header*>(body);
+            auto flags = static_cast<message_flags>(header->flags.value());
+
+            message msg = {};
+            msg.id = header->id.value();
+            msg.request_id = header->request_id.value();
+
+            int8_t name_length = header->name_length.value();
+            if (msg.request_id && name_length) {
+                fatal_error("Response message must have a zero-length name.");
+            } else if (name_length <= 0) {
+                fatal_error("Message name length must be positive.");
+            }
+            msg.name = std::string(header->name, header->name_length.value());
+            msg.body = std::string(body + sizeof(*header) + name_length, body + payload.size());
+
 #ifdef TRACE_JSON
-            logf("==> %s\n\n", json.c_str());
+            logf("==> #%" PRIu64 "# ", msg.id);
+            if (msg.request_id) {
+                logf(": #%" PRIu64 "# ", msg.request_id);
+            } else {
+                logf("%s ", msg.name.c_str());
+            }
+            logf("%s\n", msg.body.c_str());
 #endif
 
-            picojson::value value;
-            auto err = picojson::parse(value, json);
-            if (!err.empty()) {
-                fatal_error("Malformed incoming message: %s", err.c_str());
-            }
-
-            if (value.is<picojson::null>()) {
+            if (msg.name == "Disconnect") {
                 terminate("Shutdown request received.");
-            }
-
-            if (!value.is<picojson::array>()) {
-                fatal_error("Message must be an array.");
-            }
-
-            auto& array = value.get<picojson::array>();
-            if (array.size() < 1) {
-                fatal_error("Message must be of the form [[id, name, blob_count], ...].");
-            }
-
-            auto& header = array[0].get<picojson::array>();
-            if (header.size() < 3 || !header[0].is<std::string>() || !header[1].is<std::string>() || !header[2].is<double>()) {
-                fatal_error("Message must be of the form [[id, name, blob_count], ...].");
-            }
-
-            message incoming = {};
-            incoming.id = header[0].get<std::string>();
-            incoming.name = header[1].get<std::string>();
-            if (incoming.name.empty()) {
-                fatal_error("Message must have a non-empty name.");
-            }
-
-            incoming.blob_count = static_cast<size_t>(header[2].get<double>());
-            if (incoming.blob_count < 0) {
-                fatal_error("blob_count must be >= 0.");
-            }
-
-            if (incoming.name[0] == ':') {
-                if (header.size() < 4 || !header[3].is<std::string>()) {
-                    fatal_error("Response message must be of the form [[id, name, blob_count, request_id], ...].");
-                }
-
-                incoming.request_id = header[3].get<std::string>();
-            }
-
-            auto args = array.begin() + 1;
-            incoming.args.assign(args, array.end());
-
-            if (incoming.name == "!/") {
-                return handle_cancel(incoming);
-            } else if (incoming.name == "?CreateBlob") {
-                std::lock_guard<std::mutex> lock(binary_message_queue_mutex);
-                binary_message_queue.push(incoming);
-                return;
-            } else if (incoming.name == "?GetBlob") {
-                return get_blobs(incoming);
-            } else if (incoming.name == "!DestroyBlob") {
-                return destroy_blobs(incoming);
-            } else if (incoming.name.size() >= 2 && incoming.name[0] == '?' && incoming.name[1] == '=') {
+            } else if (msg.name == "/") {
+                return handle_cancel(msg);
+            } else if (msg.name == "CreateBlob") {
+                return create_blob(msg);
+            } else if (msg.name == "GetBlob") {
+                return get_blobs(msg);
+            } else if (msg.name == "DestroyBlob") {
+                return destroy_blobs(msg);
+            } else if (msg.name == "=") {
                 std::lock_guard<std::mutex> lock(eval_requests_mutex);
-                eval_requests.push(incoming);
+                eval_requests.push(msg);
                 unblock_message_loop();
                 return;
             }
@@ -923,37 +908,9 @@ namespace rhost {
                 fatal_error("Unexpected incoming client message - not an eval or cancellation request, and not expecting a response.");
             }
 
-            response = incoming;
+            response = msg;
             response_state = RESPONSE_RECEIVED;
             unblock_message_loop();
-        }
-
-        void handle_binary_message(ws_connection_type::message_ptr msg) {
-            std::lock_guard<std::mutex> lock(binary_message_queue_mutex);
-
-            if (binary_message_queue.size() != 1) {
-                fatal_error("Unexpected incoming client message - host was expecting a binary message.");
-            }
-
-            message incoming = binary_message_queue.front();
-            const auto& raw = msg->get_raw_payload();
-            incoming.blob.emplace_back(raw.data(), raw.data() + raw.size());
-
-            if (incoming.blob_count == incoming.blob.size()) {
-                create_blob(incoming);
-                binary_message_queue.pop();
-             }
-        }
-
-        void ws_message_handler(websocketpp::connection_hdl hdl, ws_connection_type::message_ptr msg) {
-            if (msg->get_opcode() == websocketpp::frame::opcode::value::binary) {
-                handle_binary_message(msg);
-            } else {
-                if (binary_message_queue.size() > 0) {
-                    fatal_error("Unexpected incoming client message - host was expecting a binary (blob) message.");
-                }
-                handle_json_message(msg);
-            }
         }
 
         void ws_close_handler(websocketpp::connection_hdl h) {

@@ -28,7 +28,7 @@ using namespace rhost::log;
 namespace js = picojson;
 
 namespace rhost {
-    namespace raw {
+    namespace blobs {
         namespace {
             void blob_error(SEXP sexp, const char* format, ...) {
                 SEXP repr_sexp = STRING_ELT(Rf_deparse1line(sexp, R_FALSE), 0);
@@ -47,17 +47,17 @@ namespace rhost {
                 Rf_error("%s", buf);
             }
 
-            bool to_blob_internal(SEXP sexp, rhost::util::blob& blob) {
+            bool to_blob_internal(SEXP sexp, std::string& blob) {
                 int type = TYPEOF(sexp);
                 size_t length = Rf_length(sexp);
 
-                if ((type == NILSXP) || (length == 0)) {
+                if (type == NILSXP) {
                     return true;
                 }
 
                 if (type == RAWSXP) {
                     Rbyte* data = RAW(sexp);
-                    blob.push_back(rhost::util::blob_slice(data, data + length));
+                    blob.assign(reinterpret_cast<char*>(data), length);
                     return true;
                 }
 
@@ -66,9 +66,9 @@ namespace rhost {
             }
         }
 
-        bool to_blob(SEXP sexp, rhost::util::blob& blob) {
+        bool to_blob(SEXP sexp, std::string& blob) {
             bool result = false;
-            rhost::util::errors_to_exceptions([&] {result = to_blob_internal(sexp, blob); });
+            rhost::util::errors_to_exceptions([&] { result = to_blob_internal(sexp, blob); });
             return result;
         }
     }

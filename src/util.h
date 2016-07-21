@@ -25,6 +25,11 @@
 #include "Rapi.h"
 #include "log.h"
 
+#define FLAGS_ENUM(T) \
+    inline constexpr T operator| (T x, T y) { return static_cast<T>(static_cast<std::underlying_type_t<T>>(x) | static_cast<std::underlying_type_t<T>>(y)); } \
+    inline T& operator|= (T& x, T y) { return x = x | y; } \
+    inline constexpr bool has_flag(T x, T y) { return (static_cast<std::underlying_type_t<T>>(x) & static_cast<std::underlying_type_t<T>>(y)) != 0; } \
+
 #define SCOPE_WARDEN(NAME, ...)                \
     auto xx##NAME##xx = [&]() { __VA_ARGS__ }; \
     ::rhost::util::scope_warden<decltype(xx##NAME##xx)> NAME(xx##NAME##xx)

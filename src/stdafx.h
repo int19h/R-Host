@@ -24,6 +24,7 @@
 #pragma warning(disable: 4996)
 
 #include <atomic>
+#include <cinttypes>
 #include <codecvt>
 #include <csetjmp>
 #include <cstdio>
@@ -44,7 +45,8 @@
 #include "boost/algorithm/string.hpp"
 #include "boost/date_time/posix_time/posix_time.hpp"
 #include "boost/format.hpp"
-#include "boost/program_options/cmdline.hpp"
+#include "boost/format.hpp"
+#include "boost/endian/buffers.hpp"
 #include "boost/program_options/options_description.hpp"
 #include "boost/program_options/value_semantic.hpp"
 #include "boost/program_options/variables_map.hpp"

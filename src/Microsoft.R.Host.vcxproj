@@ -186,6 +186,7 @@
     <ClCompile Include="r_util.cpp" />
     <ClCompile Include="host.cpp" />
     <ClCompile Include="detours.cpp" />
+    <ClCompile Include="transport.cpp" />
     <ClCompile Include="util.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -205,6 +206,7 @@
     <ClInclude Include="r_util.h" />
     <ClInclude Include="host.h" />
     <ClInclude Include="stdafx.h" />
+    <ClInclude Include="transport.h" />
     <ClInclude Include="util.h" />
     <ClInclude Include="xamlbuilder.h" />
   </ItemGroup>

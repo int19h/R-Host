@@ -28,12 +28,10 @@
 namespace rhost {
     namespace host {
         struct message {
-            std::string id;
-            std::string request_id; // not a response if empty
+            uint64_t id;
+            uint64_t request_id; // not a response if 0
             std::string name;
-            size_t blob_count;
-            rhost::util::blob blob;
-            picojson::array args;
+            std::string body;
         };
 
         class eval_cancel_error : std::exception {
@@ -90,8 +88,20 @@ namespace rhost {
             return send_request_and_get_response(name, args_array);
         }
 
-        int create_blob(const rhost::util::blob& blob);
-        const rhost::util::blob_slice get_blob_as_single_slice(int id);
-        void destroy_blob(int id);
+        uint64_t create_blob(std::vector<char>&& blob);
+
+        inline uint64_t create_blob(const std::vector<char>& blob) {
+            return create_blob(std::vector<char>(blob));
+        }
+
+        void get_blob(uint64_t id, std::vector<char>& result);
+
+        inline std::vector<char> get_blob(uint64_t id) {
+            std::vector<char> result;
+            get_blob(id, result);
+            return result;
+        }
+
+        void destroy_blob(uint64_t id);
     }
 }
