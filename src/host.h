@@ -61,14 +61,14 @@ namespace rhost {
         protocol::message_id send_notification(const std::string& name, const picojson::array& args, const blobs::blob& blob);
 
         template<class... Args>
-        inline protocol::message_id send_notification(const char* name, const Args&... args) {
+        inline protocol::message_id send_notification(const std::string& name, const Args&... args) {
             picojson::array args_array;
             rhost::util::append(args_array, args...);
             return send_notification(name, args_array);
         }
 
         template<class... Args>
-        inline protocol::message_id send_notification(const std::string&, const blobs::blob& blob, const Args&... args) {
+        inline protocol::message_id send_notification(const std::string& name, const blobs::blob& blob, const Args&... args) {
             picojson::array args_array;
             rhost::util::append(args_array, args...);
             return send_notification(name, blob, args_array);
@@ -77,13 +77,13 @@ namespace rhost {
         protocol::message send_request_and_get_response(const std::string&, const picojson::array& args);
 
         template<class... Args>
-        inline protocol::message send_request_and_get_response(const std::string&, const Args&... args) {
+        inline protocol::message send_request_and_get_response(const std::string& name, const Args&... args) {
             picojson::array args_array;
             rhost::util::append(args_array, args...);
             return send_request_and_get_response(name, args_array);
         }
 
-        typedef uint64_t blob_id;
+        typedef uint64_t blob_id; // range of values constrained to always fit a double
 
         blob_id create_blob(blobs::blob&& blob);
 
@@ -92,12 +92,14 @@ namespace rhost {
             return create_blob(copy);
         }
 
-        void get_blob(blob_id id, blobs::blob& blob);
+        bool get_blob(blob_id id, blobs::blob& blob);
 
         inline blobs::blob get_blob(blob_id id) {
-            blobs::blob result;
-            get_blob(id, result);
-            return result;
+            blobs::blob blob;
+            if (!get_blob(id, blob)) {
+                log::fatal_error("GetBlob: no blob with ID %lld", id);
+            }
+            return blob;
         }
 
         void destroy_blob(blob_id id);

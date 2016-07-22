@@ -99,10 +99,10 @@ namespace rhost {
         std::mutex eval_requests_mutex;
 
         struct eval_info {
-            const std::string id;
+            message_id id;
             bool is_cancelable;
 
-            eval_info(const std::string& id, bool is_cancelable)
+            eval_info(message_id id, bool is_cancelable)
                 : id(id), is_cancelable(is_cancelable) {
             }
         };
@@ -119,9 +119,9 @@ namespace rhost {
         // When cancellation for any eval on the stack is requested, all evals that follow it on the stack are also canceled,
         // since execution will not return to the eval unless all nested evals are terminated. When cancellation of all evals
         // is requested, it is implemented as cancellation of the topmost dummy eval. 
-        std::vector<eval_info> eval_stack({ eval_info("", true) });
+        std::vector<eval_info> eval_stack({ eval_info(0, true) });
         bool canceling_eval; // whether we're currently processing a cancellation request by unwinding the eval stack
-        std::string eval_cancel_target; // ID of the eval on the stack that is the cancellation target
+        message_id eval_cancel_target; // ID of the eval on the stack that is the cancellation target
         std::mutex eval_stack_mutex;
 
         blob_id next_blob_id = 1;
@@ -185,17 +185,19 @@ namespace rhost {
         }
 
         template<class... Args>
-        std::string respond_to_message(const message& request, const blob& blob, Args... args) {
-            assert(request.name[0] == '?');
+        message_id respond_to_message(const message& request, const blob& blob, Args... args) {
+            assert(request.name()[0] == '?');
 
             picojson::array args_array;
             rhost::util::append(args_array, args...);
 
-            return send_message(request.id(), ':' + request.name.substr(1), args_array, blob);
+            std::string name = request.name();
+            name[0] = ':';
+            return send_message(request.id(), name, args_array, blob);
         }
 
         template<class... Args>
-        std::string respond_to_message(const message& request, Args... args) {
+        message_id respond_to_message(const message& request, Args... args) {
             static const blob empty;
             return respond_to_message(request, empty, args...);
         }
@@ -235,7 +237,7 @@ namespace rhost {
         }
 
         void create_blob(const message& msg) {
-            assert(msg.name == "?CreateBlob");
+            assert(msg.name() == "?CreateBlob");
             blob_id id = create_blob(msg.blob());
             respond_to_message(msg, static_cast<double>(id));
         }
@@ -243,12 +245,30 @@ namespace rhost {
         blob_id create_blob(blob&& blob) {
             std::lock_guard<std::mutex> lock(blobs_mutex);
             blob_id id = ++next_blob_id;
+
+            // Check that it never overflows double mantissa, and provide immediate diagnostics if it happens.
+            if (id != blob_id(double(id))) {
+                fatal_error("Blob ID overflow");
+            }
+
             blobs[id] = std::move(blob);
             return id;
         }
 
+        bool get_blob(blob_id id, blobs::blob& blob) {
+            std::lock_guard<std::mutex> lock(blobs_mutex);
+            auto& it = blobs.find(id);
+
+            if (it == blobs.end()) {
+                return false;
+            }
+
+            blob = it->second;
+            return true;
+        }
+
         void get_blob(const message& msg) {
-            assert(msg.name == "?GetBlob");
+            assert(msg.name() == "?GetBlob");
 
             auto json = msg.json();
             if (!json[0].is<double>()) {
@@ -259,7 +279,7 @@ namespace rhost {
             std::lock_guard<std::mutex> lock(blobs_mutex);
             auto& it = blobs.find(id);
             if (it == blobs.end()) {
-                fatal_error("GetBlob: no blob with ID %lld", id);
+                fatal_error("GetBlob: no blob with ID %llu", id);
             }
 
             respond_to_message(msg, it->second);
@@ -271,7 +291,7 @@ namespace rhost {
         }
 
         void destroy_blobs(const message& msg) {
-            assert(msg.name == "!DestroyBlob");
+            assert(msg.name() == "!DestroyBlob");
 
             auto json = msg.json();
 
@@ -287,28 +307,28 @@ namespace rhost {
         }
 
         void handle_eval(const message& msg) {
-            assert(msg.name.size() >= 2 && msg.name[0] == '?' && msg.name[1] == '=');
+            assert(msg.name()[0] == '?' && msg.name()[1] == '=');
 
             auto args = msg.json();
             if (args.size() != 1 || !args[0].is<std::string>()) {
-                fatal_error("Invalid evaluation request %s: must have form [id, '=<flags>', expr].", msg.id.c_str());
+                fatal_error("Invalid evaluation request #%llu#: must have form [expr].", msg.id());
             }
 
             SCOPE_WARDEN_RESTORE(allow_callbacks);
             allow_callbacks = false;
 
             const auto& expr = from_utf8(args[0].get<std::string>());
-            log::logf("%s = %s\n\n", msg.id.c_str(), expr.c_str());
+            log::logf("#%llu# = %s\n\n", msg.id(), expr.c_str());
 
             SEXP env = nullptr;
             bool is_cancelable = false, new_env = false, no_result = false, raw_response = false;
 
-            for (auto it = msg.name.begin() + 2; it != msg.name.end(); ++it) {
-                switch (char c = *it) {
+            for (const char* p = msg.name() + 2; *p; ++p) {
+                switch (char c = *p) {
                 case 'B':
                 case 'E':
                     if (env != nullptr) {
-                        fatal_error("'%s': multiple environment flags specified.", msg.name.c_str());
+                        fatal_error("'%s': multiple environment flags specified.", msg.name());
                     }
                     env = (c == 'B') ? R_BaseEnv : R_EmptyEnv;
                     break;
@@ -328,7 +348,7 @@ namespace rhost {
                     raw_response = true;
                     break;
                 default:
-                    fatal_error("'%s': unrecognized flag '%c'.", msg.name.c_str(), c);
+                    fatal_error("'%s': unrecognized flag '%c'.", msg.name(), c);
                 }
             }
 
@@ -348,7 +368,7 @@ namespace rhost {
                 bool was_before_invoked = false;
                 auto before = [&] {
                     std::lock_guard<std::mutex> lock(eval_stack_mutex);
-                    eval_stack.push_back(eval_info(msg.id, is_cancelable));
+                    eval_stack.push_back(eval_info(msg.id(), is_cancelable));
                     was_before_invoked = true;
                 };
 
@@ -358,10 +378,10 @@ namespace rhost {
 
                     if (was_before_invoked) {
                         assert(!eval_stack.empty());
-                        assert(eval_stack.end()[-1].id == msg.id);
+                        assert(eval_stack.end()[-1].id == msg.id());
                     }
 
-                    if (canceling_eval && msg.id == eval_cancel_target) {
+                    if (canceling_eval && msg.id() == eval_cancel_target) {
                         // If we were unwinding the stack for cancellation purposes, and this eval was the target
                         // of the cancellation, then we're done and should stop unwinding. Otherwise, we should 
                         // continue unwinding after reporting the result of the evaluation, which we'll do at the
@@ -461,12 +481,12 @@ namespace rhost {
                 fatal_error("Evaluation cancellation request must be of the form [id, '/', eval_id].");
             }
 
-            std::string eval_id;
+            message_id eval_id;
             if (!args[0].is<picojson::null>()) {
-                if (!args[0].is<std::string>()) {
-                    fatal_error("Evaluation cancellation request eval_id must be string or null.");
+                if (!args[0].is<double>()) {
+                    fatal_error("Evaluation cancellation request eval_id must be double or null.");
                 }
-                eval_id = args[0].get<std::string>();
+                eval_id = args[0].get<double>();
             }
 
             std::lock_guard<std::mutex> lock(eval_stack_mutex);
@@ -589,7 +609,7 @@ namespace rhost {
                 if (msg.name()[0] == '?' && msg.name()[1] == '=') {
                     handle_eval(msg);
                 } else {
-                    fatal_error("Unrecognized incoming message name '%s'.", msg.name.c_str());
+                    fatal_error("Unrecognized incoming message name '%s'.", msg.name());
                 }
             }
         }
@@ -800,15 +820,16 @@ namespace rhost {
                 return;
             }
 
-            if (incoming.name == "!/") {
+            std::string name = incoming.name();
+            if (name == "!/") {
                 return handle_cancel(incoming);
-            } else if (incoming.name == "?CreateBlob") {
+            } else if (name == "?CreateBlob") {
                 return create_blob(incoming);
-            } else if (incoming.name == "?GetBlob") {
+            } else if (name == "?GetBlob") {
                 return get_blob(incoming);
-            } else if (incoming.name == "!DestroyBlob") {
+            } else if (name == "!DestroyBlob") {
                 return destroy_blobs(incoming);
-            } else if (incoming.name.size() >= 2 && incoming.name[0] == '?' && incoming.name[1] == '=') {
+            } else if (name.size() >= 2 && name[0] == '?' && name[1] == '=') {
                 std::lock_guard<std::mutex> lock(eval_requests_mutex);
                 eval_requests.push(incoming);
                 unblock_message_loop();
