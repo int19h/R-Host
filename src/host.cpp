@@ -82,7 +82,7 @@ namespace rhost {
         std::promise<void> connected_promise;
         std::atomic<bool> is_connection_closed = false;
         std::atomic<bool> is_waiting_for_wm = false;
-        std::atomic<message_id> next_message_id = 2;
+        std::atomic<message_id> next_message_id = 1;
         bool allow_callbacks = true, allow_intr_in_CallBack = true;
 
         // Specifies whether the host is currently expecting a response message to some earlier request that it had sent.
