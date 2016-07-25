@@ -821,7 +821,9 @@ namespace rhost {
             }
 
             std::string name = incoming.name();
-            if (name == "!/") {
+            if (name == "!Q") {
+                terminate("Shutdown request received.");
+            } else if (name == "!/") {
                 return handle_cancel(incoming);
             } else if (name == "?CreateBlob") {
                 return create_blob(incoming);
