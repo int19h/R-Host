@@ -82,7 +82,7 @@ namespace rhost {
         std::promise<void> connected_promise;
         std::atomic<bool> is_connection_closed = false;
         std::atomic<bool> is_waiting_for_wm = false;
-        std::atomic<message_id> next_message_id = 1;
+        std::atomic<message_id> last_message_id = -1;
         bool allow_callbacks = true, allow_intr_in_CallBack = true;
 
         // Specifies whether the host is currently expecting a response message to some earlier request that it had sent.
@@ -142,11 +142,30 @@ namespace rhost {
             }
         }
 
+        void log_message(const char* prefix, message_id id, message_id request_id, const std::string& name, const picojson::array& args, const blob& blob) {
+#ifdef TRACE_JSON
+            std::ostringstream str;
+            str << prefix << " #" << id << "# " << name;
+
+            if (request_id > 0 && request_id < std::numeric_limits<message_id>::max()) {
+                str << " #" << request_id << "#";
+            }
+
+            str << " " << picojson::value(args).serialize();
+
+            if (!blob.empty()) {
+                str << " <raw (" << blob.size() << " bytes)>";
+            }
+
+            logf("%s\n\n", str.str().c_str());
+#endif
+        }
+
         message_id send_message(message_id request_id, const std::string& name, const picojson::array& args, const blob& blob) {
             assert(name[0] == '!' || name[0] == '?' || name[0] == ':');
 
-            message_id id = next_message_id;
-            next_message_id += 2;
+            message_id id = last_message_id += 2;
+            log_message("<==", id, request_id, name, args, blob);
 
             if (is_connection_closed) {
                 return id;
@@ -156,8 +175,8 @@ namespace rhost {
 
             size_t buf_size = sizeof message_repr + name.size() + 1 + json.size() + 1 + blob.size();
             std::unique_ptr<char[]> buf(new char[buf_size]);
-            auto repr = *reinterpret_cast<message_repr*>(&buf[0]);
 
+            auto& repr = *reinterpret_cast<message_repr*>(buf.get());
             repr.id = id;
             repr.request_id = request_id;
 
@@ -237,7 +256,7 @@ namespace rhost {
         }
 
         void create_blob(const message& msg) {
-            assert(msg.name() == "?CreateBlob");
+            assert(!strcmp(msg.name(), "?CreateBlob"));
             blob_id id = create_blob(msg.blob());
             respond_to_message(msg, static_cast<double>(id));
         }
@@ -268,7 +287,7 @@ namespace rhost {
         }
 
         void get_blob(const message& msg) {
-            assert(msg.name() == "?GetBlob");
+            assert(!strcmp(msg.name(), "?GetBlob"));
 
             auto json = msg.json();
             if (!json[0].is<double>()) {
@@ -291,7 +310,7 @@ namespace rhost {
         }
 
         void destroy_blobs(const message& msg) {
-            assert(msg.name() == "!DestroyBlob");
+            assert(!strcmp(msg.name(), "!DestroyBlob"));
 
             auto json = msg.json();
 
@@ -481,12 +500,12 @@ namespace rhost {
                 fatal_error("Evaluation cancellation request must be of the form [id, '/', eval_id].");
             }
 
-            message_id eval_id;
+            message_id eval_id = 0;
             if (!args[0].is<picojson::null>()) {
                 if (!args[0].is<double>()) {
                     fatal_error("Evaluation cancellation request eval_id must be double or null.");
                 }
-                eval_id = args[0].get<double>();
+                eval_id = static_cast<message_id>(args[0].get<double>());
             }
 
             std::lock_guard<std::mutex> lock(eval_stack_mutex);
@@ -801,11 +820,9 @@ namespace rhost {
 
         void ws_message_handler(websocketpp::connection_hdl hdl, ws_connection_type::message_ptr msg) {
             const auto& payload = msg->get_payload();
-#ifdef TRACE_JSON
-            logf("==> %s\n\n", payload.c_str());
-#endif
 
             auto incoming = message::parse(payload);
+            log_message("==>", incoming.id(), incoming.request_id(), incoming.name(), incoming.json(), incoming.blob());
 
             if (incoming.is_response()) {
                 std::lock_guard<std::mutex> lock(response_mutex);
@@ -821,7 +838,7 @@ namespace rhost {
             }
 
             std::string name = incoming.name();
-            if (name == "!Q") {
+            if (name == "!End") {
                 terminate("Shutdown request received.");
             } else if (name == "!/") {
                 return handle_cancel(incoming);

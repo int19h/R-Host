@@ -58,7 +58,7 @@ namespace rhost {
             }
         }
 
-        protocol::message_id send_notification(const std::string& name, const picojson::array& args, const blobs::blob& blob);
+        protocol::message_id send_notification(const std::string& name, const picojson::array& args, const blobs::blob& blob = blobs::blob());
 
         template<class... Args>
         inline protocol::message_id send_notification(const std::string& name, const Args&... args) {
@@ -71,7 +71,7 @@ namespace rhost {
         inline protocol::message_id send_notification(const std::string& name, const blobs::blob& blob, const Args&... args) {
             picojson::array args_array;
             rhost::util::append(args_array, args...);
-            return send_notification(name, blob, args_array);
+            return send_notification(name, args_array, blob);
         }
 
         protocol::message send_request_and_get_response(const std::string&, const picojson::array& args);

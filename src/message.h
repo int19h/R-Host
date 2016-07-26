@@ -15,7 +15,8 @@ namespace rhost {
         public:
             static const message_id request_marker = std::numeric_limits<message_id>::max();
 
-            message() : _id(0), _request_id(0), _name(nullptr), _json(nullptr), _blob(nullptr) {
+            message() :
+                _id(0), _request_id(0), _name(0), _json(0), _blob(0) {
             }
 
             static message parse(std::string&& payload);
@@ -45,19 +46,23 @@ namespace rhost {
             }
 
             const char* name() const {
-                return _name;
+                return &_payload[_name];
             }
 
             const char* blob_data() const {
-                return _blob;
+                return &_payload[_blob];
             }
 
             size_t blob_size() const {
-                return _payload.size() - (_blob - &_payload[0]);
+                return _payload.size() - _blob;
             }
 
             blobs::blob blob() const {
                 return blobs::blob(blob_data(), blob_data() + blob_size());
+            }
+
+            const char* json_text() const {
+                return &_payload[_json];
             }
 
             picojson::array json() const;
@@ -68,14 +73,15 @@ namespace rhost {
             message_id _request_id;
             std::string _payload;
 
-            // The following pointers all point inside _payload. _name and _json are guaranteed
+            // The following all point inside _payload. _name and _json are guaranteed
             // to be null-terminated. Blob spans from from _blob to end of _payload.
-            const char* _name;
-            const char* _json;
-            const char* _blob;
+            ptrdiff_t _name;
+            ptrdiff_t _json;
+            ptrdiff_t _blob;
 
-            message(message_id id, message_id request_id, std::string&& payload, const char* name, const char* json, const char* blob) :
-                _id(id), _request_id(request_id), _payload(payload), _name(name), _json(json), _blob(blob) {
+            message(message_id id, message_id request_id, std::string&& payload, ptrdiff_t name, ptrdiff_t json, ptrdiff_t blob) :
+                _id(id), _request_id(request_id), _payload(std::move(payload)),
+                _name(name), _json(json), _blob(blob) {
             }
         };
     }

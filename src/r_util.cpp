@@ -452,11 +452,11 @@ namespace rhost {
 
             Rbyte* data = RAW(obj);
             blob_id id = rhost::host::create_blob(blobs::blob(data, data + length));
-            return Rf_ScalarReal(id);
+            return Rf_ScalarReal(static_cast<double>(id));
         }
 
         extern "C" SEXP get_blob(SEXP id) {
-            blob_id blob_id = Rf_asReal(id);
+            auto blob_id = static_cast<host::blob_id>(Rf_asReal(id));
             auto data = rhost::host::get_blob(blob_id);
 
             SEXP rawVector = nullptr;

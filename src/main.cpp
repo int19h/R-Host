@@ -178,7 +178,7 @@ namespace rhost {
         rp.SaveAction = SA_NOSAVE;
 
         rhost::host::register_callbacks(rp);
-        rhost::detours::init_ui_detours();
+        //rhost::detours::init_ui_detours();
 
         R_set_command_line_arguments(args.argc, args.argv.data());
         R_common_command_line(&args.argc, args.argv.data(), &rp);
