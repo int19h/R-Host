@@ -36,7 +36,8 @@ namespace rhost {
 #endif
 
             std::atomic<FILE*> input;
-            FILE *output;
+            FILE* output;
+            std::mutex output_lock;
 
             void log_message(const char* prefix, message_id id, message_id request_id, const char* name, const char* json, const blobs::blob& blob) {
 #ifdef TRACE_JSON
@@ -86,9 +87,14 @@ namespace rhost {
         void initialize() {
             assert(!input.load() && !output);
 
+            setmode(fileno(stdin), _O_BINARY);
+            setmode(fileno(stdout), _O_BINARY);
+
             // Duplicate and stash away handles for original stdin & stdout.
             input = fdopen(dup(fileno(stdin)), "rb");
+            setvbuf(input, NULL, _IONBF, 0);
             output = fdopen(dup(fileno(stdout)), "wb");
+            setvbuf(output, NULL, _IONBF, 0);
 
             // Redirect stdin and stdout to the null device, so that any code trying to write directly
             // to them (instead of via R_WriteConsole) will not interfere with the protocol.
@@ -98,7 +104,6 @@ namespace rhost {
             std::thread(receive_worker).detach();
         }
 
-
         void send_message(const message& msg) {
             assert(output);
 
@@ -106,8 +111,11 @@ namespace rhost {
 
             auto& payload = msg.payload();
             boost::endian::little_uint32_buf_t msg_size(static_cast<uint32_t>(payload.size()));
+
+            std::lock_guard<std::mutex> lock(output_lock);
             if (fwrite(&msg_size, sizeof msg_size, 1, output) == 1) {
                 if (fwrite(payload.data(), payload.size(), 1, output) == 1) {
+                    fflush(output);
                     return;
                 }
             }

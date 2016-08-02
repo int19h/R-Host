@@ -71,6 +71,7 @@
 
 #ifdef _WIN32
 #include <io.h>
+#include <fcntl.h>
 #include "windows.h"
 #else
 #include <unistd.h>

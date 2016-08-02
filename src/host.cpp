@@ -722,19 +722,6 @@ namespace rhost {
         }
 
         void message_received(const message& incoming) {
-            if (incoming.is_response()) {
-                std::lock_guard<std::mutex> lock(response_mutex);
-                assert(response_state != RESPONSE_RECEIVED);
-                if (response_state == RESPONSE_UNEXPECTED) {
-                    fatal_error("Unexpected incoming client response.");
-                }
-
-                response = std::move(incoming);
-                response_state = RESPONSE_RECEIVED;
-                unblock_message_loop();
-                return;
-            }
-
             std::string name = incoming.name();
             if (name == "!End") {
                 terminate("Shutdown request received.");
@@ -751,6 +738,19 @@ namespace rhost {
                 eval_requests.push(incoming);
                 unblock_message_loop();
                 return;
+            } else if (incoming.is_response()) {
+                std::lock_guard<std::mutex> lock(response_mutex);
+                assert(response_state != RESPONSE_RECEIVED);
+                if (response_state == RESPONSE_UNEXPECTED) {
+                    fatal_error("Unexpected incoming client response.");
+                }
+
+                response = std::move(incoming);
+                response_state = RESPONSE_RECEIVED;
+                unblock_message_loop();
+                return;
+            } else {
+                fatal_error("Unrecognized message.");
             }
         }
 
@@ -758,6 +758,8 @@ namespace rhost {
             // R itself is built with MinGW, and links to msvcrt.dll, so it uses the latter's exit() to terminate the main loop.
             // To ensure that our code runs during shutdown, we need to use the corresponding atexit().
             msvcrt::atexit(atexit_handler);
+
+            main_thread_id = GetCurrentThreadId();
 
             transport::message_received.connect(message_received);
 
@@ -767,6 +769,8 @@ namespace rhost {
             rp.ShowMessage = ShowMessage;
             rp.YesNoCancel = YesNoCancel;
             rp.Busy = Busy;
+
+            send_notification("!Microsoft.R.Host", 1.0, getDLLVersion());
         }
 
         extern "C" void ShowMessage(const char* s) {
