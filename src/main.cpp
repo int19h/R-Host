@@ -186,6 +186,7 @@ namespace rhost {
 }
 
 int main(int argc, char** argv) {
+    ::MessageBox(0, 0, 0, 0);
     setlocale(LC_NUMERIC, "C");
     __try {
         return rhost::run(argc, argv);

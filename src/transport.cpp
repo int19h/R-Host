@@ -61,13 +61,13 @@ namespace rhost {
                 FILE* input = rhost::transport::input;
                 for (;;) {
                     boost::endian::little_uint32_buf_t msg_size;
-                    if (fread(&msg_size, sizeof msg_size, 1, input) != sizeof msg_size) {
+                    if (fread(&msg_size, sizeof msg_size, 1, input) != 1) {
                         break;
                     }
 
                     std::string payload(msg_size.value(), '\0');
                     if (!payload.empty()) {
-                        if (fread(&payload[0], payload.size(), 1, input) != payload.size()) {
+                        if (fread(&payload[0], payload.size(), 1, input) != 1) {
                             break;
                         }
                     }
@@ -106,8 +106,8 @@ namespace rhost {
 
             auto& payload = msg.payload();
             boost::endian::little_uint32_buf_t msg_size(static_cast<uint32_t>(payload.size()));
-            if (fwrite(&msg_size, sizeof msg_size, 1, output) == sizeof msg_size) {
-                if (fwrite(payload.data(), payload.size(), 1, output) == payload.size()) {
+            if (fwrite(&msg_size, sizeof msg_size, 1, output) == 1) {
+                if (fwrite(payload.data(), payload.size(), 1, output) == 1) {
                     return;
                 }
             }

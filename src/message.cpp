@@ -50,14 +50,18 @@ namespace rhost {
             repr.id = _id;
             repr.request_id = _request_id;
 
+            const char* start = &_payload.front();
             char* p = repr.data;
 
+            _name = p - start;
             strcpy(p, name.c_str());
             p += name.size() + 1;
 
+            _json = p - start;
             strcpy(p, json.c_str());
             p += json.size() + 1;
 
+            _blob = p - start;
             memcpy(p, blob.data(), blob.size());
         }
 
