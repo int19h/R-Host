@@ -69,7 +69,14 @@
 #include "websocketpp/config/asio_no_tls.hpp"
 #pragma warning(pop)
 
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
 #include "windows.h"
+#else
+#include <unistd.h>
+#endif
+
 
 #pragma warning(push)
 #pragma warning(disable:4091)
@@ -77,3 +84,5 @@
 #pragma warning(pop)
 
 #include "minhook.h"
+
+
