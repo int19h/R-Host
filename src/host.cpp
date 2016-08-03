@@ -762,6 +762,7 @@ namespace rhost {
             main_thread_id = GetCurrentThreadId();
 
             transport::message_received.connect(message_received);
+            transport::disconnected.connect(unblock_message_loop);
 
             rp.ReadConsole = R_ReadConsole;
             rp.WriteConsoleEx = WriteConsoleEx;

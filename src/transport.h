@@ -28,6 +28,8 @@ namespace rhost {
     namespace transport {
         extern boost::signals2::signal<void(const protocol::message&)> message_received;
 
+        extern boost::signals2::signal<void()> disconnected;
+
         void initialize();
 
         void send_message(const protocol::message& msg);

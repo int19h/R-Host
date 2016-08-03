@@ -35,8 +35,8 @@ namespace rhost {
                 "/dev/null";
 #endif
 
-            std::atomic<FILE*> input;
-            FILE* output;
+            std::atomic<bool> connected;
+            FILE *input, *output;
             std::mutex output_lock;
 
             void log_message(const char* prefix, message_id id, message_id request_id, const char* name, const char* json, const blobs::blob& blob) {
@@ -58,8 +58,13 @@ namespace rhost {
 #endif
             }
 
+            void disconnect() {
+                if (connected.exchange(false)) {
+                    disconnected();
+                }
+            }
+
             void receive_worker() {
-                FILE* input = rhost::transport::input;
                 for (;;) {
                     boost::endian::little_uint32_buf_t msg_size;
                     if (fread(&msg_size, sizeof msg_size, 1, input) != 1) {
@@ -78,14 +83,16 @@ namespace rhost {
                     message_received(msg);
                 }
 
-                rhost::transport::input = nullptr;
+                disconnect();
             }
         }
 
         boost::signals2::signal<void(const protocol::message&)> message_received;
 
+        boost::signals2::signal<void()> disconnected;
+
         void initialize() {
-            assert(!input.load() && !output);
+            assert(!input && !output);
 
             setmode(fileno(stdin), _O_BINARY);
             setmode(fileno(stdout), _O_BINARY);
@@ -101,6 +108,7 @@ namespace rhost {
             freopen(devNull, "rb", stdin);
             freopen(devNull, "wb", stdout);
 
+            connected = true;
             std::thread(receive_worker).detach();
         }
 
@@ -120,11 +128,11 @@ namespace rhost {
                 }
             }
 
-            rhost::transport::input = nullptr;
+            disconnect();
         }
 
         bool is_connected() {
-            return input.load() != nullptr;
+            return connected;
         }
     }
 }
