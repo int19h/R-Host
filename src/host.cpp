@@ -519,6 +519,8 @@ namespace rhost {
                         }
                     }
 
+                    terminate_if_closed();
+
                     // R_ProcessEvents may invoke CallBack. If there is a pending cancellation request, we do
                     // not want CallBack to call Rf_onintr as it normally does, since it would unwind the stack
                     // using longjmp, which will skip destructors for all our local variables. Instead, make
