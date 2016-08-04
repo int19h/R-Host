@@ -576,6 +576,8 @@ namespace rhost {
         }
 
         extern "C" void CallBack() {
+            terminate_if_closed();
+
             // Called periodically by R_ProcessEvents and Rf_eval. This is where we check for various
             // cancellation requests and issue an interrupt (Rf_onintr) if one is applicable in the
             // current context.
