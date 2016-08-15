@@ -37,6 +37,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -62,16 +63,10 @@
 
 #include "picojson.h"
 
-#pragma warning(push, 0)
-#define _WEBSOCKETPP_CPP11_STL_
-#include "websocketpp/client.hpp"
-#include "websocketpp/server.hpp"
-#include "websocketpp/config/asio_no_tls.hpp"
-#pragma warning(pop)
-
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
+#include <process.h>
 #include "windows.h"
 #else
 #include <unistd.h>

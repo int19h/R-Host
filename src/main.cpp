@@ -42,9 +42,6 @@ namespace po = boost::program_options;
 namespace rhost {
     struct command_line_args {
         std::string name;
-        boost::optional<boost::asio::ip::tcp::endpoint> listen_endpoint;
-        boost::optional<websocketpp::uri> connect_uri;
-
         std::vector<std::string> unrecognized;
         int argc;
         std::vector<char*> argv;
