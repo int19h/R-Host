@@ -43,6 +43,12 @@ namespace rhost {
         boost::signals2::signal<void()> callback_started;
         boost::signals2::signal<void()> readconsole_done;
 
+        fs::path rdata;
+        std::atomic<bool> shutdown_requested = false;
+
+        std::mutex idle_timer_lock;
+        std::chrono::steady_clock::time_point idling_since;
+
         DWORD main_thread_id;
         std::atomic<bool> is_waiting_for_wm = false;
         bool allow_callbacks = true, allow_intr_in_CallBack = true;
@@ -90,20 +96,6 @@ namespace rhost {
         std::map<blob_id, blob> blobs;
         std::mutex blobs_mutex;
 
-        void terminate_if_closed() {
-            // terminate invokes R_Suicide, which may invoke WriteConsole and/or ShowMessage, which will
-            // then call terminate again, so we need to prevent infinite recursion here.
-            static bool is_terminating;
-            if (is_terminating) {
-                return;
-            }
-
-            if (!transport::is_connected()) {
-                is_terminating = true;
-                terminate("Lost connection to client.");
-            }
-        }
-
         void log_message(const char* prefix, message_id id, message_id request_id, const std::string& name, const picojson::array& args, const blob& blob) {
 #ifdef TRACE_JSON
             std::ostringstream str;
@@ -123,8 +115,16 @@ namespace rhost {
 #endif
         }
 
+        void reset_idle_timer() {
+            std::lock_guard<std::mutex> lock(idle_timer_lock);
+            idling_since = std::chrono::steady_clock::now();
+        }
+
         message_id send_notification(const std::string& name, const picojson::array& args, const blob& blob) {
             assert(name[0] == '!');
+
+            reset_idle_timer();
+
             message msg(0, name, args, blob);
             transport::send_message(msg);
             return msg.id();
@@ -133,6 +133,8 @@ namespace rhost {
         template<class... Args>
         message_id respond_to_message(const message& request, const blob& blob, Args... args) {
             assert(request.name()[0] == '?');
+
+            reset_idle_timer();
 
             picojson::array json;
             rhost::util::append(json, args...);
@@ -162,7 +164,6 @@ namespace rhost {
             return it == eval_stack.end();
         }
 
-
         // Unblock any pending with_response call that is waiting in a message loop.
         void unblock_message_loop() {
             // Because PeekMessage can dispatch messages that were sent, which may in turn result 
@@ -182,6 +183,98 @@ namespace rhost {
                 if (delay < 5000ms) {
                     delay *= 2;
                 }
+            }
+        }
+
+        void terminate_if_disconnected() {
+            // terminate invokes R_Suicide, which may invoke WriteConsole and/or ShowMessage, which will
+            // then call terminate again, so we need to prevent infinite recursion here.
+            static bool is_terminating;
+            if (is_terminating) {
+                return;
+            }
+
+            if (!transport::is_connected()) {
+                is_terminating = true;
+                terminate("Lost connection to client.");
+            }
+        }
+
+        void shutdown_if_requested() {
+            terminate_if_disconnected();
+
+            if (!shutdown_requested) {
+                return;
+            }
+
+            // Make sure we don't try handle the pending shutdown request more than once.
+            static std::atomic<bool> is_shutting_down;
+            bool expected = false;
+            if (!is_shutting_down.compare_exchange_strong(expected, true)) {
+                return;
+            }
+
+            if (!rdata.empty()) {
+                std::string s = rdata.string();
+                logf("Saving workspace to %s...\n", s.c_str());
+
+                bool saved = r_top_level_exec([&] {
+                    R_SaveGlobalEnvToFile(s.c_str());
+                });
+
+                logf(saved ? "Workspace saved successfully.\n" : "Failed to save workspace.\n");
+                send_notification("!Shutdown", saved);
+            }
+
+            terminate("Shutting down by request.");
+        }
+
+        void request_shutdown(bool save_rdata) {
+            if (!save_rdata) {
+                rdata.clear();
+            }
+
+            shutdown_requested = true;
+
+            std::thread([] {
+                std::this_thread::sleep_for(1min);
+                terminate("Timed out while waiting for graceful shutdown to complete; terminating process.");
+            }).detach();
+
+            unblock_message_loop();
+        }
+
+        void request_shutdown(const message& msg) {
+            assert(!strcmp(msg.name(), "!Shutdown"));
+
+            if (shutdown_requested) {
+                return;
+            }
+
+            auto json = msg.json();
+            if (!json[0].is<bool>()) {
+                fatal_error("Invalid evaluation request: 1 boolean argument expected");
+            }
+            auto save_rdata = json[0].get<bool>();
+
+            request_shutdown(save_rdata);
+        }
+
+        void idle_timer_thread(std::chrono::seconds idle_timeout) {
+            for (;;) {
+                std::chrono::steady_clock::time_point idling_since;
+                {
+                    std::lock_guard<std::mutex> lock(idle_timer_lock);
+                    idling_since = host::idling_since;
+                }
+
+                auto delta = std::chrono::steady_clock::now() - idling_since;
+                if (delta > idle_timeout) {
+                    request_shutdown(true);
+                    break;
+                }
+
+                std::this_thread::sleep_until(idling_since + idle_timeout);
             }
         }
 
@@ -621,7 +714,8 @@ namespace rhost {
             message request(message::request_marker, name, args, blob());
             transport::send_message(request);
             auto id = request.id();
-            terminate_if_closed();
+
+            shutdown_if_requested();
 
             indent_log(+1);
             SCOPE_WARDEN(dedent_log, { indent_log(-1); });
@@ -652,7 +746,7 @@ namespace rhost {
                         }
                     }
 
-                    terminate_if_closed();
+                    shutdown_if_requested();
 
                     // R_ProcessEvents may invoke CallBack. If there is a pending cancellation request, we do
                     // not want CallBack to call Rf_onintr as it normally does, since it would unwind the stack
@@ -674,7 +768,7 @@ namespace rhost {
 
                     allow_intr_in_CallBack = true;
 
-                    terminate_if_closed();
+                    shutdown_if_requested();
 
                     if (query_interrupt()) {
                         throw eval_cancel_error();
@@ -709,7 +803,9 @@ namespace rhost {
         }
 
         extern "C" void CallBack() {
-            terminate_if_closed();
+            shutdown_if_requested();
+
+            reset_idle_timer();
 
             // Called periodically by R_ProcessEvents and Rf_eval. This is where we check for various
             // cancellation requests and issue an interrupt (Rf_onintr) if one is applicable in the
@@ -850,18 +946,12 @@ namespace rhost {
             });
         }
 
-        extern "C" void atexit_handler() {
-            if (transport::is_connected()) {
-                with_cancellation([&] {
-                    send_notification("!End");
-                });
-            }
-        }
-
         void message_received(const message& incoming) {
+            reset_idle_timer();
+
             std::string name = incoming.name();
-            if (name == "!End") {
-                terminate("Shutdown request received.");
+            if (name == "!Shutdown") {
+                request_shutdown(incoming);
             } else if (name == "!/") {
                 return handle_cancel(incoming);
             } else if (name == "?CreateBlob") {
@@ -897,10 +987,8 @@ namespace rhost {
             }
         }
 
-        void initialize(structRstart& rp) {
-            // R itself is built with MinGW, and links to msvcrt.dll, so it uses the latter's exit() to terminate the main loop.
-            // To ensure that our code runs during shutdown, we need to use the corresponding atexit().
-            msvcrt::atexit(atexit_handler);
+        void initialize(structRstart& rp, const fs::path& rdata, std::chrono::seconds idle_timeout) {
+            host::rdata = rdata;
 
             main_thread_id = GetCurrentThreadId();
 
@@ -915,6 +1003,11 @@ namespace rhost {
             rp.Busy = Busy;
 
             send_notification("!Microsoft.R.Host", 1.0, getDLLVersion());
+
+            if (idle_timeout > 0s) {
+                logf("Host process will shut down after %lld seconds of inactivity.\n", idle_timeout.count());
+                std::thread([&] { idle_timer_thread(idle_timeout); }).detach();
+            }
         }
 
         extern "C" void ShowMessage(const char* s) {

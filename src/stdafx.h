@@ -28,6 +28,7 @@
 #include <atomic>
 #include <cinttypes>
 #include <codecvt>
+#include <chrono>
 #include <csetjmp>
 #include <cstdio>
 #include <cstdlib>
@@ -82,4 +83,4 @@
 
 #include "zip.h"
 
-namespace fs = std::experimental::filesystem;
+namespace fs = std::tr2::sys;

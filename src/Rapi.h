@@ -258,6 +258,8 @@ extern "C" {
     extern void Rf_KillAllDevices(void);
     extern void R_CleanTempDir(void);
     extern void R_SaveGlobalEnv(void);
+    extern void R_SaveGlobalEnvToFile(const char*);
+    extern void R_RestoreGlobalEnvFromFile(const char*, Rboolean);
     extern SEXP R_ParseVector(SEXP, int, ParseStatus*, SEXP);
     extern SEXP R_tryEval(SEXP, SEXP, int*);
     extern SEXP R_tryEvalSilent(SEXP, SEXP, int*);
