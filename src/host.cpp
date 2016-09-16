@@ -46,6 +46,9 @@ namespace rhost {
         fs::path rdata;
         std::atomic<bool> shutdown_requested = false;
 
+        std::promise<void> r_ready_promise;
+        std::future<void> r_ready = r_ready_promise.get_future();
+
         std::mutex idle_timer_lock;
         std::chrono::steady_clock::time_point idling_since;
 
@@ -701,6 +704,23 @@ namespace rhost {
             throw;
         }
 
+        void handle_pending_evals() {
+            for (;;) {
+                message msg;
+                {
+                    std::lock_guard<std::mutex> lock(eval_requests_mutex);
+                    if (eval_requests.empty()) {
+                        break;
+                    } else {
+                        msg = eval_requests.front();
+                        eval_requests.pop();
+                    }
+                }
+
+                handle_eval(msg);
+            }
+        }
+
         inline message send_request_and_get_response(const std::string& name, const picojson::array& args) {
             assert(name[0] == '?');
 
@@ -724,15 +744,7 @@ namespace rhost {
                 message msg;
                 for (;;) {
                     {
-                        // If there's anything in eval queue, break to process that.
-                        {
-                            std::lock_guard<std::mutex> lock(eval_requests_mutex);
-                            if (!eval_requests.empty()) {
-                                msg = eval_requests.front();
-                                eval_requests.pop();
-                                break;
-                            }
-                        }
+                        handle_pending_evals();
 
                         std::lock_guard<std::mutex> lock(response_mutex);
                         if (response_state == RESPONSE_UNEXPECTED) {
@@ -775,22 +787,17 @@ namespace rhost {
                     }
                 }
 
-                if (msg.is_response()) {
-                    if (msg.request_id() != id) {
-                        fatal_error("Received response [%llu,'%s'], while awaiting response for [%llu,'%s'].",
-                            msg.request_id(), msg.name(), id, name.c_str());
-                    } else if (strcmp(msg.name() + 1, name.c_str() + 1) != 0) {
-                        fatal_error("Response to [%llu,'%s'] has mismatched name '%s'.",
-                            id, name.c_str(), msg.name());
-                    }
-                    return msg;
+                assert(msg.is_response());
+
+                if (msg.request_id() != id) {
+                    fatal_error("Received response [%llu,'%s'], while awaiting response for [%llu,'%s'].",
+                        msg.request_id(), msg.name(), id, name.c_str());
+                } else if (strcmp(msg.name() + 1, name.c_str() + 1) != 0) {
+                    fatal_error("Response to [%llu,'%s'] has mismatched name '%s'.",
+                        id, name.c_str(), msg.name());
                 }
 
-                if (msg.name()[0] == '?' && msg.name()[1] == '=') {
-                    handle_eval(msg);
-                } else {
-                    fatal_error("Unrecognized incoming message name '%s'.", msg.name());
-                }
+                return msg;
             }
         }
 
@@ -831,26 +838,17 @@ namespace rhost {
 
             // Process any pending eval requests if reentrancy is allowed.
             if (allow_callbacks) {
-                for (;;) {
-                    message msg;
-                    {
-                        std::lock_guard<std::mutex> lock(eval_requests_mutex);
-                        if (eval_requests.empty()) {
-                            break;
-
-                        } else {
-                            msg = eval_requests.front();
-                            eval_requests.pop();
-                        }
-                    }
-
-                    handle_eval(msg);
-                }
+                handle_pending_evals();
             }
         }
 
         extern "C" int R_ReadConsole(const char* prompt, char* buf, int len, int addToHistory) {
             return with_cancellation([&] {
+                // The moment we get the first ReadConsole from R is when it's ready to process our requests.
+                // Until then, attempts to do things (especially to eval arbitrary code) can fail because
+                // the standard library is not fully loaded yet.
+                r_ready_promise.set_value();
+
                 if (!allow_intr_in_CallBack) {
                     // If we got here, this means that we've just processed a cancellation request that had
                     // unwound the context stack all the way to the bottom, cancelling all the active evals;
@@ -948,6 +946,10 @@ namespace rhost {
 
         void message_received(const message& incoming) {
             reset_idle_timer();
+
+            // If R is not ready yet, wait until it is before processing any incoming requests
+            // to avoid racing with R initialization code.
+            r_ready.wait();
 
             std::string name = incoming.name();
             if (name == "!Shutdown") {
