@@ -437,6 +437,7 @@ extern "C" {
     void R_WaitEvent();
     void R_ProcessEvents();
     void R_Suicide(const char *);
+    void R_CleanUp(SA_TYPE saveact, int status, int runLast);
 
     typedef SEXP(*CCODE)(SEXP, SEXP, SEXP, SEXP);
 
