@@ -46,8 +46,9 @@ namespace rhost {
         fs::path rdata;
         std::atomic<bool> shutdown_requested = false;
 
-        std::promise<void> r_ready_promise;
-        std::future<void> r_ready = r_ready_promise.get_future();
+        bool is_r_ready = false;
+        std::mutex is_r_ready_lock;
+        std::condition_variable is_r_ready_cond;
 
         std::mutex idle_timer_lock;
         std::chrono::steady_clock::time_point idling_since;
@@ -847,7 +848,11 @@ namespace rhost {
                 // The moment we get the first ReadConsole from R is when it's ready to process our requests.
                 // Until then, attempts to do things (especially to eval arbitrary code) can fail because
                 // the standard library is not fully loaded yet.
-                r_ready_promise.set_value();
+                {
+                    std::lock_guard<std::mutex> lock(is_r_ready_lock);
+                    is_r_ready = true;
+                    is_r_ready_cond.notify_all();
+                }
 
                 if (!allow_intr_in_CallBack) {
                     // If we got here, this means that we've just processed a cancellation request that had
@@ -949,7 +954,10 @@ namespace rhost {
 
             // If R is not ready yet, wait until it is before processing any incoming requests
             // to avoid racing with R initialization code.
-            r_ready.wait();
+            {
+                std::unique_lock<std::mutex> lock(is_r_ready_lock);
+                is_r_ready_cond.wait(lock, [] { return is_r_ready; });
+            }
 
             std::string name = incoming.name();
             if (name == "!Shutdown") {
