@@ -227,7 +227,7 @@ namespace rhost {
                 });
 
                 logf(saved ? "Workspace saved successfully.\n" : "Failed to save workspace.\n");
-                send_notification("!Shutdown", saved);
+                send_notification("!End", saved);
             }
 
             terminate("Shutting down by request.");
