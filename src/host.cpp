@@ -654,16 +654,19 @@ namespace rhost {
             }
         }
 
-        void handle_cancel(const message& msg) {
+        void handle_cancel(const std::string& name, const message& msg) {
+            assert(name == "!/" || name == "!//");
             auto args = msg.json();
-            if (args.size() != 1) {
-                fatal_error("Evaluation cancellation request must be of the form [id, '/', eval_id].");
-            }
 
-            message_id eval_id = 0;
-            if (!args[0].is<picojson::null>()) {
-                if (!args[0].is<double>()) {
-                    fatal_error("Evaluation cancellation request eval_id must be double or null.");
+            message_id eval_id;
+            if (name == "!//") {
+                if (!args.empty()) {
+                    fatal_error("Incorrect number or type of arguments to '!//'.");
+                }
+                eval_id = 0;
+            } else {
+                if (args.size() != 1 || !args[0].is<double>()) {
+                    fatal_error("Incorrect number or type of arguments to '!/'.");
                 }
                 eval_id = static_cast<message_id>(args[0].get<double>());
             }
@@ -962,8 +965,8 @@ namespace rhost {
             std::string name = incoming.name();
             if (name == "!Shutdown") {
                 request_shutdown(incoming);
-            } else if (name == "!/") {
-                return handle_cancel(incoming);
+            } else if (name == "!/" || name == "!//") {
+                return handle_cancel(name, incoming);
             } else if (name == "?CreateBlob") {
                 return create_blob(incoming);
             } else if (name == "?GetBlobSize") {
