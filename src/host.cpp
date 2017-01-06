@@ -235,11 +235,7 @@ namespace rhost {
             terminate("Shutting down by request.");
         }
 
-        void request_shutdown(bool save_rdata) {
-            if (!save_rdata) {
-                rdata.clear();
-            }
-
+        void request_shutdown() {
             shutdown_requested = true;
 
             std::thread([] {
@@ -258,12 +254,14 @@ namespace rhost {
             }
 
             auto json = msg.json();
-            if (!json[0].is<bool>()) {
-                fatal_error("Invalid evaluation request: 1 boolean argument expected");
+            if (json.size() != 0) {
+                if (!json[0].is<std::string>()) {
+                    fatal_error("Invalid shutdown request: 0 or 1 string arguments expected");
+                }
+                rdata = json[0].get <std::string>();
             }
-            auto save_rdata = json[0].get<bool>();
 
-            request_shutdown(save_rdata);
+            request_shutdown();
         }
 
         void idle_timer_thread(std::chrono::seconds idle_timeout) {
@@ -276,7 +274,7 @@ namespace rhost {
 
                 auto delta = std::chrono::steady_clock::now() - idling_since;
                 if (delta > idle_timeout) {
-                    request_shutdown(true);
+                    request_shutdown();
                     break;
                 }
 
