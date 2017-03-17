@@ -5,9 +5,11 @@ if(${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
     message(FATAL_ERROR "In-source builds are not allowed. Please invoke CMake from ./build, or use ./build.sh helper script.")
 endif()
 
-set(CMAKE_BUILD_TYPE Debug)
-
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_HOME_DIRECTORY}/bin/)
+if(CMAKE_BUILD_TYPE MATCHES DEBUG)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_HOME_DIRECTORY}/bin/Release)
+else()
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_HOME_DIRECTORY}/bin/Debug)
+endif()
 
 include_directories("${CMAKE_SOURCE_DIR}/lib/picojson" "${CMAKE_SOURCE_DIR}/lib/picojson")
 #link_directories("${CMAKE_SOURCE_DIR}/lib/picojson")
