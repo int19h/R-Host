@@ -1,2 +1,5 @@
 #!/bin/sh
-cd build && cmake -G "Unix Makefiles" .. && make
+mkdir -p build && \
+cd build && \
+cmake -G "Unix Makefiles" .. && \
+make
