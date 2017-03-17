@@ -25,14 +25,14 @@ if (NOT libzip_LIBRARY)
 endif()
 include_directories(${libzip_INCLUDE_DIRS})
 
-find_library(minhook_LIBRARY NAMES MinHook)
-if (NOT minhook_LIBRARY)
-    message(FATAL_ERROR "minhook not found")
+find_library(MinHook_LIBRARY NAMES MinHook)
+if (NOT MinHook_LIBRARY)
+    message(FATAL_ERROR "MinHook not found")
 endif()
-include_directories(${minhook_INCLUDE_DIRS})
+include_directories(${MinHook_INCLUDE_DIRS})
 
 file(GLOB src "*.h" "*.cpp")
 
 add_executable(Microsoft.R.Host ${src})
 
-target_link_libraries(Microsoft.R.Host ${R_LIBRARIES} ${Boost_LIBRARIES} ${libzip_LIBRARY} ${minhook_LIBRARY} ${WIN32_LIBRARIES})
+target_link_libraries(Microsoft.R.Host ${R_LIBRARIES} ${Boost_LIBRARIES} ${libzip_LIBRARY} ${MinHook_LIBRARY} ${WIN32_LIBRARIES})
