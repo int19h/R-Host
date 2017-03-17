@@ -1,6 +1,8 @@
 cmake_minimum_required (VERSION 2.7)
 project (R-Host)
 
+set(CMAKE_BUILD_TYPE Debug)
+
 add_definitions(-DUNICODE -D_UNICODE)
 
 include_directories("${PROJECT_SOURCE_DIR}/../lib/picojson" "${PROJECT_SOURCE_DIR}/../lib/picojson")
