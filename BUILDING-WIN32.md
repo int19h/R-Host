@@ -23,7 +23,7 @@ Close MSYS prompt, and open MinGW 64-bit prompt.
 
 Go to src directory. Run CMake and make:
 ```sh
-cmake .
+cmake -G "Unix Makefiles" .
 make
 ```
 
